@@ -7,13 +7,11 @@ import re
 import os
 from dotenv import load_dotenv
 
-# -------------------- CONFIG --------------------
+# Load environment variables
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-print("GEMINI_API_KEY:", GEMINI_API_KEY)  # Debugging line
 
-genai.configure(api_key=GEMINI_API_KEY)
-
+# -------------------- CONFIG --------------------
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel("gemini-2.5-flash")
 
 # -------------------- PDF TEXT EXTRACTION --------------------
@@ -38,16 +36,16 @@ def clean_json(response_text):
 
 
 # -------------------- GEMINI: EXTRACT SKILLS --------------------
-def extract_skills(text):
+def extract_info(text):
     prompt = f"""
-    You are an expert ATS (Applicant Tracking System).
+    You are an expert ATS system.
 
-    Analyze this resume and extract:
-    1. Top skills (technical + soft skills)
-    2. Experience level (Beginner / Intermediate / Expert)
-    3. Suitable job roles
+    Analyze the resume and extract:
+    1. Skills
+    2. Experience level
+    3. Suitable roles
 
-    Return ONLY valid JSON:
+    Return ONLY JSON:
     {{
         "skills": [],
         "experience": "",
@@ -59,7 +57,7 @@ def extract_skills(text):
     """
 
     response = model.generate_content(prompt)
-    return response.text
+    return clean_json(response.text)
 
 
 # -------------------- FETCH JOBS --------------------
@@ -70,70 +68,98 @@ def fetch_jobs():
     return response.json()
 
 
-# -------------------- MATCH JOBS --------------------
-def match_jobs(skills, jobs):
-    matched = []
+# -------------------- AI MATCH SCORING --------------------
+def ai_match_score(resume_text, job):
+    job_desc = f"""
+    Job Title: {job.get("position")}
+    Company: {job.get("company")}
+    Description: {job.get("description")}
+    """
 
-    for job in jobs:
+    prompt = f"""
+    You are an expert recruiter.
+
+    Compare the resume with the job description.
+
+    Give:
+    1. Match score (0-100)
+    2. Short reason
+    3. Missing important skills
+
+    Return ONLY JSON:
+    {{
+        "score": number,
+        "reason": "",
+        "missing_skills": []
+    }}
+
+    Resume:
+    {resume_text}
+
+    Job:
+    {job_desc}
+    """
+
+    response = model.generate_content(prompt)
+    return clean_json(response.text)
+
+
+# -------------------- AI MATCH JOBS --------------------
+def ai_match_jobs(resume_text, jobs):
+    results = []
+
+    for job in jobs[:10]:  # limit to reduce API cost
         if not isinstance(job, dict):
             continue
 
-        description = str(job.get("description", "")).lower()
-        score = 0
+        data = ai_match_score(resume_text, job)
 
-        for skill in skills:
-            if skill.lower() in description:
-                score += 1
+        results.append({
+            "title": job.get("position"),
+            "company": job.get("company"),
+            "score": data.get("score", 0),
+            "reason": data.get("reason", ""),
+            "missing": data.get("missing_skills", []),
+            "link": job.get("url")
+        })
 
-        if score > 0:
-            matched.append({
-                "title": job.get("position"),
-                "company": job.get("company"),
-                "score": score,
-                "link": job.get("url")
-            })
-
-    return sorted(matched, key=lambda x: x["score"], reverse=True)[:10]
+    return sorted(results, key=lambda x: x["score"], reverse=True)
 
 
 # -------------------- STREAMLIT UI --------------------
 st.set_page_config(page_title="AI Job Agent", page_icon="🚀")
 
-st.title("🚀 AI Job Matching Agent (Gemini Powered)")
+st.title("🚀 AI Job Matching Agent (Gemini + AI Scoring)")
 
 uploaded_file = st.file_uploader("Upload your resume (PDF)")
 
 if uploaded_file:
-    st.info("Reading your resume...")
-    text = extract_text_from_pdf(uploaded_file)
+    st.info("📄 Reading resume...")
+    resume_text = extract_text_from_pdf(uploaded_file)
 
-    st.info("Analyzing with AI...")
-    result = extract_skills(text)
+    st.info("🧠 Extracting info with AI...")
+    info = extract_info(resume_text)
 
-    data = clean_json(result)
+    st.subheader("🧠 Extracted Profile")
+    st.write("**Skills:**", info.get("skills", []))
+    st.write("**Experience:**", info.get("experience", ""))
+    st.write("**Roles:**", info.get("roles", []))
 
-    skills = data.get("skills", [])
-    experience = data.get("experience", "")
-    roles = data.get("roles", [])
-
-    st.subheader("🧠 Extracted Info")
-    st.write("**Skills:**", skills)
-    st.write("**Experience Level:**", experience)
-    st.write("**Suggested Roles:**", roles)
-
-    st.info("Fetching jobs...")
+    st.info("🌍 Fetching jobs...")
     jobs = fetch_jobs()
 
-    st.info("Matching jobs for you...")
-    matches = match_jobs(skills, jobs)
+    st.info("🤖 AI is matching jobs (this may take ~10–20 sec)...")
+    matches = ai_match_jobs(resume_text, jobs)
 
-    st.subheader("🔥 Top Job Matches")
+    st.subheader("🔥 Top AI-Matched Jobs")
 
     if matches:
         for job in matches:
             st.write(f"### {job['title']} at {job['company']}")
-            st.write(f"Match Score: {job['score']}")
+            st.write(f"✅ Match Score: {job['score']}/100")
+            st.write(f"💡 Reason: {job['reason']}")
+            st.write(f"⚠️ Missing Skills: {job['missing']}")
             st.write(job['link'])
             st.write("---")
     else:
-        st.warning("No strong matches found. Try improving your resume.")
+        st.warning("No matches found. Try a different resume.")
